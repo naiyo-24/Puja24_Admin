@@ -1,7 +1,9 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:super_drag_and_drop/super_drag_and_drop.dart';
 import 'package:dio/dio.dart' as dio;
 import '../models/place.dart';
 import '../providers/pandal_provider.dart';
@@ -56,6 +58,7 @@ class _PandalFormScreenState extends ConsumerState<PandalFormScreen> {
   final ImagePicker _picker = ImagePicker();
   List<XFile> _selectedImages = [];
   List<String> _existingImages = [];
+  bool _isDragging = false;
 
   final List<String> _placeTypes = ['pandal', 'restaurant', 'cafe', 'metro', 'parking', 'toilet'];
 
@@ -125,7 +128,7 @@ class _PandalFormScreenState extends ConsumerState<PandalFormScreen> {
         });
         
         final response = await dioClient.post(
-          '/api/uploads/places', 
+          '/api/uploads/place_image', 
           data: formData,
           options: dio.Options(
             headers: {
@@ -150,8 +153,8 @@ class _PandalFormScreenState extends ConsumerState<PandalFormScreen> {
           newUrls.add(returnedUrl);
         }
       } on dio.DioException catch (e) {
-        debugPrint('Failed to upload image (DioException): \${e.message}');
-        debugPrint('Backend response: \${e.response?.data}');
+        debugPrint('Failed to upload image (DioException): ${e.message}');
+        debugPrint('Backend response: ${e.response?.data}');
       } catch (e) {
         debugPrint('Failed to upload image: $e');
       }
@@ -423,34 +426,148 @@ class _PandalFormScreenState extends ConsumerState<PandalFormScreen> {
           ],
         ),
         const SizedBox(height: 12),
-        if (totalImages == 0)
-          Container(
-            height: 120,
+        DropRegion(
+          formats: Formats.standardFormats,
+          onDropOver: (event) {
+            if (!_isDragging) {
+              setState(() {
+                _isDragging = true;
+              });
+            }
+            return DropOperation.copy;
+          },
+          onDropLeave: (event) {
+            setState(() {
+              _isDragging = false;
+            });
+          },
+          onPerformDrop: (event) async {
+            setState(() {
+              _isDragging = false;
+            });
+            
+            final maxAllowed = 5 - totalImages;
+            if (maxAllowed <= 0) {
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Maximum 5 images allowed')));
+              return;
+            }
+
+            int addedCount = 0;
+            for (final item in event.session.items) {
+              if (addedCount >= maxAllowed) break;
+              
+              final reader = item.dataReader;
+              if (reader == null) continue;
+
+              void handleBytes(Uint8List? bytes, String name) {
+                 if (bytes != null && mounted) {
+                    setState(() {
+                       _selectedImages.add(XFile.fromData(bytes, name: name));
+                       addedCount++;
+                    });
+                 }
+              }
+
+              if (reader.canProvide(Formats.png)) {
+                 reader.getFile(Formats.png, (file) async {
+                    final bytes = await file.readAll();
+                    handleBytes(bytes, 'image_\${DateTime.now().millisecondsSinceEpoch}.png');
+                 });
+              } else if (reader.canProvide(Formats.jpeg)) {
+                 reader.getFile(Formats.jpeg, (file) async {
+                    final bytes = await file.readAll();
+                    handleBytes(bytes, 'image_\${DateTime.now().millisecondsSinceEpoch}.jpg');
+                 });
+              } else if (reader.canProvide(Formats.htmlText)) {
+                 reader.getValue<String>(Formats.htmlText, (html) async {
+                    if (html != null) {
+                       final RegExp regex = RegExp(r'src="([^"]+)"');
+                       final match = regex.firstMatch(html);
+                       if (match != null && match.groupCount >= 1) {
+                          final url = match.group(1);
+                          if (url != null && (url.startsWith('http://') || url.startsWith('https://'))) {
+                             try {
+                                // Try downloading directly first
+                                final response = await dio.Dio().get(url, options: dio.Options(responseType: dio.ResponseType.bytes));
+                                handleBytes(response.data, 'image_\${DateTime.now().millisecondsSinceEpoch}.jpg');
+                             } catch (e) {
+                                // If it fails (likely due to CORS), try with a public proxy
+                                try {
+                                  final proxyUrl = 'https://api.allorigins.win/raw?url=\${Uri.encodeComponent(url)}';
+                                  final response = await dio.Dio().get(proxyUrl, options: dio.Options(responseType: dio.ResponseType.bytes));
+                                  handleBytes(response.data, 'image_\${DateTime.now().millisecondsSinceEpoch}.jpg');
+                                } catch (proxyError) {
+                                  debugPrint('Error downloading dropped html image via proxy: \$proxyError');
+                                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to load image. Please download it to your computer first.')));
+                                }
+                             }
+                          }
+                       }
+                    }
+                 });
+              } else if (reader.canProvide(Formats.plainText)) {
+                 reader.getValue<String>(Formats.plainText, (text) async {
+                    if (text != null && (text.startsWith('http://') || text.startsWith('https://'))) {
+                       try {
+                          final response = await dio.Dio().get(text, options: dio.Options(responseType: dio.ResponseType.bytes));
+                          handleBytes(response.data, 'image_\${DateTime.now().millisecondsSinceEpoch}.jpg');
+                       } catch (e) {
+                          try {
+                            final proxyUrl = 'https://api.allorigins.win/raw?url=\${Uri.encodeComponent(text)}';
+                            final response = await dio.Dio().get(proxyUrl, options: dio.Options(responseType: dio.ResponseType.bytes));
+                            handleBytes(response.data, 'image_\${DateTime.now().millisecondsSinceEpoch}.jpg');
+                          } catch (proxyError) {
+                            debugPrint('Error downloading dropped url via proxy: \$proxyError');
+                            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to load image. Please download it to your computer first.')));
+                          }
+                       }
+                    }
+                 });
+              }
+            }
+          },
+          child: Container(
             width: double.infinity,
             decoration: BoxDecoration(
-              color: Colors.grey.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.grey.withValues(alpha: 0.3), style: BorderStyle.solid),
+              border: _isDragging 
+                  ? Border.all(color: AppTheme.primaryColor, width: 2) 
+                  : Border.all(color: Colors.transparent, width: 2),
+              borderRadius: BorderRadius.circular(14),
             ),
-            child: const Center(child: Text('No images selected', style: TextStyle(color: Colors.grey))),
-          )
-        else
-          SizedBox(
-            height: 120,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              children: [
-                ..._existingImages.asMap().entries.map((e) => _buildThumbnail(
-                  url: e.value,
-                  onRemove: () => setState(() => _existingImages.removeAt(e.key)),
-                )),
-                ..._selectedImages.asMap().entries.map((e) => _buildThumbnail(
-                  xfile: e.value,
-                  onRemove: () => setState(() => _selectedImages.removeAt(e.key)),
-                )),
-              ],
-            ),
+            child: totalImages == 0
+                ? Container(
+                    height: 120,
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: _isDragging ? AppTheme.primaryColor.withValues(alpha: 0.1) : Colors.grey.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.grey.withValues(alpha: 0.3), style: BorderStyle.solid),
+                    ),
+                    child: Center(
+                      child: Text(
+                        _isDragging ? 'Drop images here' : 'No images selected (Drag & drop here)', 
+                        style: TextStyle(color: _isDragging ? AppTheme.primaryColor : Colors.grey)
+                      ),
+                    ),
+                  )
+                : SizedBox(
+                    height: 120,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      children: [
+                        ..._existingImages.asMap().entries.map((e) => _buildThumbnail(
+                          url: e.value,
+                          onRemove: () => setState(() => _existingImages.removeAt(e.key)),
+                        )),
+                        ..._selectedImages.asMap().entries.map((e) => _buildThumbnail(
+                          xfile: e.value,
+                          onRemove: () => setState(() => _selectedImages.removeAt(e.key)),
+                        )),
+                      ],
+                    ),
+                  ),
           ),
+        ),
       ],
     );
   }
@@ -458,21 +575,82 @@ class _PandalFormScreenState extends ConsumerState<PandalFormScreen> {
   Widget _buildThumbnail({String? url, XFile? xfile, required VoidCallback onRemove}) {
     return Stack(
       children: [
-        Container(
-          margin: const EdgeInsets.only(right: 12),
-          width: 120,
-          height: 120,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            color: Colors.grey[200],
-            image: DecorationImage(
-              fit: BoxFit.cover,
-              image: url != null 
-                  ? NetworkImage(url.startsWith('http') ? url : '${ApiConstants.baseUrl}$url') as ImageProvider
-                  : NetworkImage(xfile!.path), // For web, xfile.path acts as a blob URL
+        if (url != null)
+          Container(
+            margin: const EdgeInsets.only(right: 12),
+            width: 120,
+            height: 120,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: Colors.grey[200],
             ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Image.network(
+                url.startsWith('http') ? url : '${ApiConstants.baseUrl}$url',
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => const Icon(Icons.broken_image, color: Colors.grey, size: 40),
+              ),
+            ),
+          )
+        else if (xfile != null)
+          FutureBuilder<Uint8List>(
+            future: xfile.readAsBytes(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return Container(
+                  margin: const EdgeInsets.only(right: 12),
+                  width: 120,
+                  height: 120,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    color: Colors.grey[200],
+                  ),
+                  child: const Center(child: CircularProgressIndicator()),
+                );
+              }
+              if (snapshot.hasError || !snapshot.hasData) {
+                return Container(
+                  margin: const EdgeInsets.only(right: 12),
+                  width: 120,
+                  height: 120,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    color: Colors.grey[200],
+                  ),
+                  child: const Icon(Icons.error, color: Colors.red),
+                );
+              }
+              return Container(
+                margin: const EdgeInsets.only(right: 12),
+                width: 120,
+                height: 120,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  color: Colors.grey[200],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.memory(
+                    snapshot.data!,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) => Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.insert_drive_file, color: Colors.grey, size: 40),
+                        const SizedBox(height: 4),
+                        Text(
+                          xfile.name.length > 10 ? '${xfile.name.substring(0, 10)}...' : xfile.name,
+                          style: const TextStyle(fontSize: 10, color: Colors.grey),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
-        ),
         Positioned(
           top: 4,
           right: 16,

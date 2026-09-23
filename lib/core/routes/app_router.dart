@@ -10,8 +10,8 @@ import '../../features/users/screens/user_list_screen.dart';
 import '../../features/banners/screens/banner_list_screen.dart';
 import '../../features/auth/providers/auth_provider.dart';
 import '../../features/passes/screens/pass_management_screen.dart';
+import '../../features/pandals/models/place.dart';
 import '../widgets/main_layout.dart';
-
 final goRouterProvider = Provider<GoRouter>((ref) {
   final notifier = RouterNotifier(ref);
 
@@ -50,8 +50,14 @@ final goRouterProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'edit',
                 builder: (context, state) {
-                  final place = state.extra; 
-                  return PandalFormScreen(pandal: place as dynamic);
+                  final extra = state.extra;
+                  Place? place;
+                  if (extra is Place) {
+                    place = extra;
+                  } else if (extra is Map<String, dynamic>) {
+                    place = Place.fromJson(extra);
+                  }
+                  return PandalFormScreen(pandal: place);
                 },
               ),
             ]

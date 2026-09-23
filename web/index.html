@@ -42,5 +42,14 @@
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
   <script src="flutter_bootstrap.js" async></script>
+  <!-- Prevent browser from opening dragged images in a new tab -->
+  <script>
+    window.addEventListener('dragover', function(e) {
+      e.preventDefault();
+    }, false);
+    window.addEventListener('drop', function(e) {
+      e.preventDefault();
+    }, false);
+  </script>
 </body>
 </html>
